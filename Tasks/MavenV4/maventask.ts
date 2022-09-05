@@ -6,7 +6,7 @@ import fs = require('fs');
 
 import * as tl from 'azure-pipelines-task-lib/task';
 import {ToolRunner} from 'azure-pipelines-task-lib/toolrunner';
-import {CodeCoverageEnablerFactory} from 'azure-pipelines-tasks-codecoverage-tools/codecoveragefactory';
+import {CodeCoverageEnablerFactory} from 'azure-pipelines-tasks-codecoverage-tools-v3/codecoveragefactory';
 import {CodeAnalysisOrchestrator} from "azure-pipelines-tasks-codeanalysis-common/Common/CodeAnalysisOrchestrator";
 import {BuildOutput, BuildEngine} from 'azure-pipelines-tasks-codeanalysis-common/Common/BuildOutput';
 import {CheckstyleTool} from 'azure-pipelines-tasks-codeanalysis-common/Common/CheckstyleTool';
@@ -46,8 +46,7 @@ var codeCoverageFailed: boolean = false;
 var summaryFile: string = null;
 var reportDirectory: string = null;
 var reportPOMFile: string = null;
-var execFileJacoco: string = null;
-var ccReportTask: string = null;
+var ccReportDir: string = null;
 
 let buildOutput: BuildOutput = new BuildOutput(tl.getVariable('System.DefaultWorkingDirectory'), BuildEngine.Maven);
 var codeAnalysisOrchestrator:CodeAnalysisOrchestrator = new CodeAnalysisOrchestrator(
@@ -141,7 +140,7 @@ async function execBuild() {
     // 5. Always publish test results even if tests fail, causing this task to fail.
     // 6. If #3 or #4 above failed, exit with an error code to mark the entire step as failed.
 
-    ccReportTask = await execEnableCodeCoverage();
+    ccReportDir = await execEnableCodeCoverage();
     var userRunFailed: boolean = false;
     var codeAnalysisFailed: boolean = false;
 
@@ -247,7 +246,7 @@ async function execBuild() {
             mvnRun.arg(mavenGoals);
 
             // 2. Apply any goals for static code analysis tools selected by the user.
-            mvnRun = applySonarQubeArgs(mvnRun, execFileJacoco);
+            mvnRun = applySonarQubeArgs(mvnRun);
 
             mvnRun = codeAnalysisOrchestrator.configureBuild(mvnRun);
 
@@ -303,9 +302,6 @@ async function execBuild() {
                 publishJUnitTestResults(testResultsFiles);
             }
             publishCodeCoverage(isCodeCoverageOpted).then(function() {
-                if (isCodeCoverageOpted) {
-                    replaceImageSourceToBase64();
-                }
                 tl.debug('publishCodeCoverage userRunFailed=' + userRunFailed);
 
                 // 6. If #3 or #4 above failed, exit with an error code to mark the entire step as failed.
@@ -329,20 +325,15 @@ async function execBuild() {
         });
 }
 
-function applySonarQubeArgs(mvnsq: ToolRunner | any, execFileJacoco?: string): ToolRunner | any {
+function applySonarQubeArgs(mvnsq: ToolRunner | any): ToolRunner | any {
     const isJacocoCoverageReportXML: boolean = tl.getBoolInput('isJacocoCoverageReportXML', false);
 
     if (!tl.getBoolInput('sqAnalysisEnabled', false)) {
         return mvnsq;
     }
 
-    // Apply argument for the JaCoCo tool, if enabled
-    if (typeof execFileJacoco != "undefined" && execFileJacoco) {
-        mvnsq.arg('-Dsonar.jacoco.reportPaths=' + execFileJacoco);
-    }
-
     if (isJacocoCoverageReportXML && summaryFile) {
-        mvnsq.arg(`-Dsonar.coverage.jacoco.xmlReportPaths=${summaryFile}`);
+        // mvnsq.arg(`-Dsonar.coverage.jacoco.xmlReportPaths=${summaryFile}`);
     }
 
     switch (tl.getInput('sqMavenPluginVersionChoice')) {
@@ -405,16 +396,16 @@ function execEnableCodeCoverage(): Q.Promise<string> {
     return enableCodeCoverage()
         .then(function (resp) {
             tl.debug("Enabled code coverage successfully");
-            return "CodeCoverage_9064e1d0";
+            return resp;
         }).catch(function (err) {
             tl.warning("Failed to enable code coverage: " + err);
             return "";
         });
 };
 
-function enableCodeCoverage() : Q.Promise<any> {
+function enableCodeCoverage() : Q.Promise<string> {
     if(!isCodeCoverageOpted){
-        return Q.resolve(true);
+        return Q.resolve('');
     }
 
     var classFilter: string = tl.getInput('classFilter');
@@ -422,29 +413,23 @@ function enableCodeCoverage() : Q.Promise<any> {
     var sourceDirectories: string = tl.getInput('srcDirectories');
     var buildRootPath = path.dirname(mavenPOMFile);
     // appending with small guid to keep it unique. Avoiding full guid to ensure no long path issues.
-    var reportPOMFileName = "CCReportPomA4D283EG.xml";
-    reportPOMFile = path.join(buildRootPath, reportPOMFileName);
-    var targetDirectory = path.join(buildRootPath, "target");
+    reportPOMFile = path.join(buildRootPath, "CCReportPomA4D283EG.xml");
 
+    let reportDirectoryName = '';
     if (ccTool.toLowerCase() == "jacoco") {
-        var reportDirectoryName = "CCReport43F6D5EF";
-        var summaryFileName = "jacoco.xml";
+        reportDirectoryName = "CCReport43F6D5EF";
     }
     else if (ccTool.toLowerCase() == "cobertura") {
-        var reportDirectoryName = path.join("target", "site");
-        reportDirectoryName = path.join(reportDirectoryName, "cobertura");
-        var summaryFileName = "coverage.xml";
+        reportDirectoryName = path.join("target", "site", "cobertura");
     }
 
     reportDirectory = path.join(buildRootPath, reportDirectoryName);
-    summaryFile = path.join(reportDirectory, summaryFileName);
 
     if (ccTool.toLowerCase() == "jacoco") {
-        execFileJacoco = path.join(reportDirectory, "jacoco.exec");
+        reportPOMFile = path.join(reportDirectory, "pom.xml");
     }
 
     // clean any previously generated files.
-    tl.rmRF(targetDirectory);
     tl.rmRF(reportDirectory);
     tl.rmRF(reportPOMFile);
 
@@ -453,7 +438,6 @@ function enableCodeCoverage() : Q.Promise<any> {
     buildProps['classfilter'] = classFilter;
     buildProps['classfilesdirectories'] = classFilesDirectories;
     buildProps['sourcedirectories'] = sourceDirectories;
-    buildProps['summaryfile'] = summaryFile;
     buildProps['reportdirectory'] = reportDirectory;
     buildProps['reportbuildfile'] = reportPOMFile;
 
@@ -463,19 +447,13 @@ function enableCodeCoverage() : Q.Promise<any> {
 
 function publishCodeCoverage(isCodeCoverageOpted: boolean): Q.Promise<boolean> {
     var defer = Q.defer<boolean>();
-    if (isCodeCoverageOpted && ccReportTask) {
+    if (isCodeCoverageOpted) {
         tl.debug("Collecting code coverage reports");
 
         if (ccTool.toLowerCase() == "jacoco") {
             var mvnReport = tl.tool(mvnExec);
             mvnReport.arg('-f');
-            if (tl.exist(reportPOMFile)) {
-                // multi module project
-                mvnReport.arg(reportPOMFile);
-            }
-            else {
-                mvnReport.arg(mavenPOMFile);
-            }
+            mvnReport.arg(mavenPOMFile);
             mvnReport.line(mavenOptions);
             mvnReport.arg("verify");
             mvnReport.arg("-Dmaven.test.skip=true"); // This argument added to skip tests to avoid running them twice. More about this argument: http://maven.apache.org/surefire/maven-surefire-plugin/examples/skipping-tests.html
@@ -502,12 +480,20 @@ function publishCodeCoverage(isCodeCoverageOpted: boolean): Q.Promise<boolean> {
 }
 
 function publishCCToTfs() {
+    let reportsFilesDirectory = ccReportDir;
+    if (ccTool.toLowerCase() == "jacoco") {
+        summaryFile = path.join(reportsFilesDirectory, "jacoco.xml");
+    } else if (ccTool.toLowerCase() == "cobertura") {
+        summaryFile = path.join(reportsFilesDirectory, "coverage.xml");
+    }
+
     if (tl.exist(summaryFile)) {
         tl.debug("Summary file = " + summaryFile);
-        tl.debug("Report directory = " + reportDirectory);
+        tl.debug("Report directory = " + reportsFilesDirectory);
         tl.debug("Publishing code coverage results to TFS");
         var ccPublisher = new tl.CodeCoveragePublisher();
-        ccPublisher.publish(ccTool, summaryFile, reportDirectory, "");
+        ccPublisher.publish(ccTool, summaryFile, reportsFilesDirectory, "");
+        replaceImageSourceToBase64(reportsFilesDirectory);
     }
     else {
         sendCodeCoverageEmptyMsg();
@@ -634,8 +620,8 @@ function execBuildWithRestore() {
  * @param fileName - name of html file with extension
  * @returns - instance of JSOM class from jsdom library
 */
-function readCodeCoverageReportAsDom(fileName: string): jsdom.JSDOM {
-    const htmlString: string = fs.readFileSync(path.join(reportDirectory, fileName), 'utf-8');
+function readCodeCoverageReportAsDom(directory: string): jsdom.JSDOM {
+    const htmlString: string = fs.readFileSync(path.join(directory, 'index.html'), 'utf-8');
     return new JSDOM(htmlString);
 }
 
@@ -643,25 +629,25 @@ function readCodeCoverageReportAsDom(fileName: string): jsdom.JSDOM {
  * @param dom - instance of JSOM class from jsdom library 
  * @param fileName - name of html file with extension
 */
-function writeDomAsHtml(dom: jsdom.JSDOM, fileName: string): void {
-    fs.writeFileSync(path.join(reportDirectory, fileName), dom.serialize())
+function writeDomAsHtml(directory: string, dom: jsdom.JSDOM, fileName: string): void {
+    fs.writeFileSync(path.join(directory, fileName), dom.serialize());
 }
 
 /**   function replace images sources to base64 code in Code Coverage report html */
-function replaceImageSourceToBase64(): void {
+function replaceImageSourceToBase64(dir: string): void {
     const imageSizeLimitKb = 1024;
     try {
-        const dom = readCodeCoverageReportAsDom('index.html');
+        const dom = readCodeCoverageReportAsDom(dir);
         const images: HTMLImageElement[] = [...dom.window.document.getElementsByTagName('img')];
         images.forEach(element => {
-            const pathToImg: string = path.join(reportDirectory, element.src)
+            const pathToImg: string = path.join(dir, element.src)
             if(fs.existsSync(pathToImg) && fs.statSync(pathToImg).size/1024 < imageSizeLimitKb) {
                 const fileType = path.extname(pathToImg).slice(1);
-                const file: string = fs.readFileSync(path.join(reportDirectory, element.src), 'base64')
+                const file: string = fs.readFileSync(path.join(dir, element.src), 'base64')
                 element.src = `data:image/${fileType};base64,` + file;
             }
         });
-        writeDomAsHtml(dom, 'index.html')
+        writeDomAsHtml(dir, dom, 'index.html')
     } catch (error) {
         tl.warning('Fail to replace images source to base64' + error)
     }
